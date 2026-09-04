@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>驾驶路况时间记录器</title>
+<style>
+  :root { --green:#27ae60; --red:#c0392b; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#f4f5f7; color:#222; touch-action:manipulation; }
+  .wrap { max-width: 560px; margin:0 auto; padding:12px; }
+  h1 { font-size:18px; text-align:center; margin:8px 0 4px; }
+  .clock { text-align:center; font-size:16px; font-weight:700; }
+  .clock .local { color:#888; font-size:12px; font-weight:400; }
+  #status { text-align:center; margin:8px 0; font-size:15px; font-weight:700; min-height:22px; }
+  #status.active { color: var(--green); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px; }
+  button.seg { padding:15px 8px; font-size:17px; border-radius:10px; border:1px solid #ccc; background:#fff; }
+  button.seg:active { transform:scale(0.97); }
+  button.seg.active { background:var(--green); color:#fff; border-color:var(--green); font-weight:700; }
+  button.seg.end { color:var(--red); font-weight:700; grid-column:1 / -1; }
+  button.seg.full { grid-column:1 / -1; }
+  .section { background:#fff; border-radius:10px; padding:10px; margin-top:12px; box-shadow:0 1px 3px rgba(0,0,0,0.08); }
+  .section h2 { font-size:14px; margin:0 0 8px; color:#555; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { padding:6px 3px; text-align:center; border-bottom:1px solid #eee; font-variant-numeric:tabular-nums; }
+  select { font-size:13px; padding:3px; border-radius:6px; max-width:86px; }
+  .mini { font-size:12px; padding:5px 7px; border-radius:6px; border:1px solid #ccc; background:#fafafa; }
+  .mini.del { color:var(--red); }
+  details { margin-top:12px; background:#fff; border-radius:10px; padding:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); }
+  summary { font-size:14px; font-weight:600; cursor:pointer; color:#555; }
+  textarea { width:100%; height:150px; margin-top:8px; font-family:monospace; font-size:12px; border:1px solid #ccc; border-radius:8px; padding:6px; }
+  .rowbtn { display:flex; gap:8px; margin-top:8px; }
+  .rowbtn button { flex:1; padding:11px; font-size:15px; border-radius:8px; border:1px solid #ccc; background:#fff; }
+  .hint { color:#999; font-size:11px; text-align:center; margin-top:10px; line-height:1.6; }
+  #toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); background:rgba(0,0,0,0.8); color:#fff; padding:10px 16px; border-radius:8px; font-size:14px; z-index:99; max-width:80%; text-align:center; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; z-index:100; }
+  .modal-box { background:#fff; border-radius:12px; padding:20px; width:280px; text-align:center; box-shadow:0 8px 30px rgba(0,0,0,0.2); }
+  .modal-box p { margin:0 0 16px; font-size:15px; }
+  .modal-btns { display:flex; gap:10px; }
+  .modal-btns button { flex:1; padding:10px; font-size:15px; border-radius:8px; border:1px solid #ccc; background:#fafafa; }
+  .modal-btns #modalOk { background:var(--red); color:#fff; border-color:var(--red); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>驾驶路况时间记录器</h1>
+  <div class="clock"><span id="utcClock">UTC --:--:--</span><br><span class="local" id="localClock"></span></div>
+  <div id="status">当前无进行中的路段</div>
+  <div class="grid" id="buttons"></div>
+
+  <div class="section">
+    <h2>已记录路段（类型名称可修改）</h2>
+    <div id="tableWrap"><p class="hint">还没有记录，按数字开始。</p></div>
+  </div>
+
+  <details>
+    <summary>导出 scene.txt（点开复制 / 备份）</summary>
+    <textarea id="exportArea" readonly placeholder="还没有记录"></textarea>
+    <div class="rowbtn">
+      <button id="copyBtn">复制全部</button>
+      <button id="clearBtn" style="color:#c0392b;">清空记录</button>
+    </div>
+  </details>
+
+  <p class="hint">时间使用 UTC 时区。记录保存在本浏览器中，建议每次结束后「复制全部」备份到备忘录。</p>
+</div>
+
+<div id="toast" hidden></div>
+<div id="modal" class="modal" hidden>
+  <div class="modal-box">
+    <p id="modalMsg"></p>
+    <div class="modal-btns">
+      <button id="modalCancel">取消</button>
+      <button id="modalOk">确认</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const NAMES = ['城市道路','隧道','开阔高速','次优高速','桥','城市峡谷','森林'];
+  const CODE_NAME = {1:'城市道路',2:'隧道',3:'开阔高速',4:'次优高速',5:'桥',6:'城市峡谷',7:'森林',0:'结束'};
+  const BUTTON_DEFS = [
+    {code:1, label:'1 · 城市道路'},
+    {code:2, label:'2 · 隧道'},
+    {code:3, label:'3 · 开阔高速'},
+    {code:4, label:'4 · 次优高速'},
+    {code:5, label:'5 · 桥'},
+    {code:6, label:'6 · 城市峡谷'},
+    {code:7, label:'7 · 森林', full:true},
+    {code:0, label:'0 · 结束', end:true},
+  ];
+  const STORAGE_KEY = 'roadrecorder_v1';
+
+  let segments = [];       // {index,start,end,name}
+  let nextIndex = 1;
+  let currentCode = null;  // 1~7 正在记录，null 表示无
+  let currentStart = null; // "HHmmss"
+
+  const $ = id => document.getElementById(id);
+
+  function pad(n){ return (n < 10 ? '0' : '') + n; }
+  function utcHHMMSS(){
+    const d = new Date();
+    return pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds());
+  }
+  function clockString(){
+    const d = new Date();
+    return 'UTC ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+  }
+  function localClockString(){
+    const d = new Date();
+    return '本地 ' + d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate())
+         + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  function setStatus(text, active){
+    const el = $('status');
+    el.textContent = text;
+    el.className = active ? 'active' : '';
+  }
+  function codeName(code){ return CODE_NAME[code] || '未知'; }
+
+  let toastTimer = null;
+  function toast(msg){
+    const t = $('toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 2000);
+  }
+  function askConfirm(msg, onOk){
+    $('modalMsg').textContent = msg;
+    $('modal').hidden = false;
+    $('modalOk').onclick = () => { $('modal').hidden = true; onOk(); };
+    $('modalCancel').onclick = () => { $('modal').hidden = true; };
+  }
+
+  function highlight(code){
+    document.querySelectorAll('button.seg').forEach(b => {
+      const c = Number(b.dataset.code);
+      if (c === code && c >= 1) b.classList.add('active');
+      else b.classList.remove('active');
+    });
+  }
+
+  function startSegment(code){
+    currentCode = code;
+    currentStart = utcHHMMSS();
+    setStatus('▶ 正在记录：' + codeName(code) + '（开始于 ' + currentStart + ' UTC）', true);
+    highlight(code);
+  }
+
+  function endSegment(){
+    const end = utcHHMMSS();
+    const name = codeName(currentCode);
+    const st = currentStart;
+    segments.push({ index: nextIndex, start: st, end: end, name: name });
+    nextIndex++;
+    currentCode = null;
+    highlight(null);
+    save();
+    render();
+    setStatus('■ 结束 [' + name + '] ' + st + ' → ' + end);
+  }
+
+  function onCode(code){
+    if (code >= 1 && code <= 7) {
+      if (currentCode !== null) endSegment();
+      startSegment(code);
+    } else if (code === 0) {
+      if (currentCode !== null) endSegment();
+      else setStatus('当前没有进行中的路段，「结束」被忽略。');
+    }
+  }
+
+  function buildText(){
+    return segments.map(s => s.index + ',utc, ' + s.start + ', ' + s.end + ', ' + s.name).join('\n');
+  }
+
+  function onNameChange(sel){
+    const i = Number(sel.dataset.i);
+    segments[i].name = sel.value;
+    save();
+    $('exportArea').value = buildText();
+  }
+
+  function deleteSeg(i){
+    askConfirm('删除第 ' + (i+1) + ' 段？', () => {
+      segments.splice(i, 1);
+      renumber();
+      save();
+      render();
+      toast('已删除');
+    });
+  }
+
+  function mergeSeg(i){
+    if (i + 1 >= segments.length){ toast('已是最后一段，无法合并'); return; }
+    segments[i].end = segments[i+1].end;  // 名称保持上一段
+    segments.splice(i+1, 1);
+    renumber();
+    save();
+    render();
+    toast('已合并');
+  }
+
+  function renumber(){
+    segments.forEach((s, j) => { s.index = j + 1; });
+    nextIndex = segments.length + 1;
+  }
+
+  function render(){
+    const wrap = $('tableWrap');
+    if (segments.length === 0) {
+      wrap.innerHTML = '<p class="hint">还没有记录，按数字开始。</p>';
+    } else {
+      let html = '<table><tr><th>编号</th><th>开始</th><th>结束</th><th>类型</th><th></th></tr>';
+      segments.forEach((s, i) => {
+        const opts = NAMES.map(n => '<option' + (n === s.name ? ' selected' : '') + '>' + n + '</option>').join('');
+        html += '<tr>'
+              + '<td>' + s.index + '</td>'
+              + '<td>' + s.start + '</td>'
+              + '<td>' + s.end + '</td>'
+              + '<td><select data-i="' + i + '">' + opts + '</select></td>'
+              + '<td><button class="mini del" data-act="del" data-i="' + i + '">删</button> '
+              + '<button class="mini" data-act="merge" data-i="' + i + '">合↓</button></td>'
+              + '</tr>';
+      });
+      html += '</table>';
+      wrap.innerHTML = html;
+    }
+    $('exportArea').value = buildText();
+  }
+
+  function save(){
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ segments: segments, nextIndex: nextIndex })); }
+    catch (e) {}
+  }
+  function load(){
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const data = JSON.parse(raw);
+        segments = data.segments || [];
+        nextIndex = data.nextIndex || (segments.length + 1);
+      }
+    } catch (e) {}
+  }
+
+  function copyAll(){
+    const text = buildText();
+    if (!text){ toast('还没有记录'); return; }
+    const details = document.querySelector('details');
+    if (details) details.open = true;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => toast('已复制到剪贴板'))
+        .catch(() => fallbackCopy(text));
+    } else {
+      fallbackCopy(text);
+    }
+  }
+  function fallbackCopy(text){
+    const ta = $('exportArea');
+    ta.value = text;
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); toast('已复制'); }
+    catch (e) { toast('复制失败，请长按文本框手动复制'); }
+  }
+
+  function initButtons(){
+    const grid = $('buttons');
+    BUTTON_DEFS.forEach(def => {
+      const b = document.createElement('button');
+      b.className = 'seg' + (def.end ? ' end' : '') + (def.full ? ' full' : '');
+      b.textContent = def.label;
+      b.dataset.code = def.code;
+      b.addEventListener('click', () => onCode(def.code));
+      grid.appendChild(b);
+    });
+  }
+
+  function tick(){
+    $('utcClock').textContent = clockString();
+    $('localClock').textContent = localClockString();
+  }
+
+  // 事件委托：表格每次重建后仍然有效
+  $('tableWrap').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const i = Number(btn.dataset.i);
+    if (btn.dataset.act === 'del') deleteSeg(i);
+    else if (btn.dataset.act === 'merge') mergeSeg(i);
+  });
+  $('tableWrap').addEventListener('change', e => {
+    const sel = e.target.closest('select[data-i]');
+    if (sel) onNameChange(sel);
+  });
+
+  // 桌面浏览器也支持键盘 0~7
+  document.addEventListener('keydown', e => {
+    const tag = e.target && e.target.tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+    if (e.key >= '0' && e.key <= '7') onCode(Number(e.key));
+  });
+
+  $('copyBtn').addEventListener('click', copyAll);
+  $('clearBtn').addEventListener('click', () => {
+    askConfirm('确定清空所有记录？', () => {
+      segments = []; nextIndex = 1; currentCode = null; highlight(null);
+      save(); render(); setStatus('已清空'); toast('已清空');
+    });
+  });
+
+  load();
+  initButtons();
+  render();
+  setInterval(tick, 1000);
+  tick();
+</script>
+</body>
+</html>
