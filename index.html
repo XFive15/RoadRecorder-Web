@@ -33,6 +33,7 @@
   details { margin-top:12px; background:#fff; border-radius:10px; padding:10px; box-shadow:0 1px 3px rgba(0,0,0,0.08); }
   summary { font-size:14px; font-weight:600; cursor:pointer; color:#555; }
   textarea { width:100%; height:150px; margin-top:8px; font-family:monospace; font-size:12px; border:1px solid #ccc; border-radius:8px; padding:6px; }
+  #importArea { height:90px; }
   .rowbtn { display:flex; gap:8px; margin-top:8px; }
   .rowbtn button { flex:1; padding:11px; font-size:15px; border-radius:8px; border:1px solid #ccc; background:#fff; }
   .hint { color:#999; font-size:11px; text-align:center; margin-top:10px; line-height:1.6; }
@@ -58,15 +59,20 @@
   </div>
 
   <details>
-    <summary>导出 scene.txt（点开复制 / 备份）</summary>
+    <summary>导出 / 导入 scene.txt（备份 / 恢复）</summary>
     <textarea id="exportArea" readonly placeholder="还没有记录"></textarea>
     <div class="rowbtn">
       <button id="copyBtn">复制全部</button>
+      <button id="shareBtn">备份到备忘录/文件</button>
+    </div>
+    <textarea id="importArea" placeholder="恢复：把之前保存的文本粘贴到这里，再点「导入」"></textarea>
+    <div class="rowbtn">
+      <button id="importBtn">导入</button>
       <button id="clearBtn" style="color:#c0392b;">清空记录</button>
     </div>
   </details>
 
-  <p class="hint">时间使用 UTC 时区。记录保存在本浏览器中，建议每次结束后「复制全部」备份到备忘录。</p>
+  <p class="hint">时间使用 UTC。记录存在本机浏览器里，为防止手机清理数据丢失，建议每次结束后点「备份到备忘录/文件」留一份在外面。</p>
 </div>
 
 <div id="toast" hidden></div>
@@ -117,13 +123,64 @@
          + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
-  function setStatus(text, active){
-    const el = $('status');
-    el.textContent = text;
-    el.className = active ? 'active' : '';
+  // ---------- 存储：localStorage + IndexedDB 双份 ----------
+  function pack(){ return { segments, nextIndex, currentCode, currentStart, savedAt: Date.now() }; }
+  function unpack(data){
+    segments = data.segments || [];
+    nextIndex = data.nextIndex || (segments.length + 1);
+    currentCode = data.currentCode || null;
+    currentStart = data.currentStart || null;
   }
-  function codeName(code){ return CODE_NAME[code] || '未知'; }
+  function idbOpen(){
+    return new Promise(resolve => {
+      try {
+        if (!('indexedDB' in window)) { resolve(null); return; }
+        const req = indexedDB.open('roadrecorder', 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch (e) { resolve(null); }
+    });
+  }
+  function idbSet(key, val){
+    idbOpen().then(db => {
+      if (!db) return;
+      try { db.transaction('kv','readwrite').objectStore('kv').put(val, key); } catch (e) {}
+    });
+  }
+  function idbGet(key){
+    return new Promise(resolve => {
+      idbOpen().then(db => {
+        if (!db) { resolve(null); return; }
+        try {
+          const rq = db.transaction('kv','readonly').objectStore('kv').get(key);
+          rq.onsuccess = () => resolve(rq.result || null);
+          rq.onerror = () => resolve(null);
+        } catch (e) { resolve(null); }
+      });
+    });
+  }
+  function save(){
+    const data = pack();
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (e) {}
+    idbSet(STORAGE_KEY, data);
+  }
+  function readLocal(){
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || null; } catch (e) { return null; }
+  }
+  async function load(){
+    const ls = readLocal();
+    const idb = await idbGet(STORAGE_KEY);
+    let data = null;
+    if (ls && idb) data = (idb.savedAt >= ls.savedAt) ? idb : ls;
+    else data = ls || idb;
+    if (data) unpack(data);
+  }
 
+  // ---------- 提示 / 确认 ----------
   let toastTimer = null;
   function toast(msg){
     const t = $('toast');
@@ -139,6 +196,13 @@
     $('modalCancel').onclick = () => { $('modal').hidden = true; };
   }
 
+  function setStatus(text, active){
+    const el = $('status');
+    el.textContent = text;
+    el.className = active ? 'active' : '';
+  }
+  function codeName(code){ return CODE_NAME[code] || '未知'; }
+
   function highlight(code){
     document.querySelectorAll('button.seg').forEach(b => {
       const c = Number(b.dataset.code);
@@ -147,11 +211,13 @@
     });
   }
 
+  // ---------- 记录逻辑 ----------
   function startSegment(code){
     currentCode = code;
     currentStart = utcHHMMSS();
     setStatus('▶ 正在记录：' + codeName(code) + '（开始于 ' + currentStart + ' UTC）', true);
     highlight(code);
+    save();  // 正在进行的段也立即持久化，中途被杀也能恢复
   }
 
   function endSegment(){
@@ -200,7 +266,7 @@
 
   function mergeSeg(i){
     if (i + 1 >= segments.length){ toast('已是最后一段，无法合并'); return; }
-    segments[i].end = segments[i+1].end;  // 名称保持上一段
+    segments[i].end = segments[i+1].end;
     segments.splice(i+1, 1);
     renumber();
     save();
@@ -236,21 +302,7 @@
     $('exportArea').value = buildText();
   }
 
-  function save(){
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ segments: segments, nextIndex: nextIndex })); }
-    catch (e) {}
-  }
-  function load(){
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const data = JSON.parse(raw);
-        segments = data.segments || [];
-        nextIndex = data.nextIndex || (segments.length + 1);
-      }
-    } catch (e) {}
-  }
-
+  // ---------- 导出 / 备份 / 导入 ----------
   function copyAll(){
     const text = buildText();
     if (!text){ toast('还没有记录'); return; }
@@ -272,7 +324,41 @@
     try { document.execCommand('copy'); toast('已复制'); }
     catch (e) { toast('复制失败，请长按文本框手动复制'); }
   }
+  function shareAll(){
+    const text = buildText();
+    if (!text){ toast('还没有记录'); return; }
+    if (!navigator.share){ copyAll(); return; }
+    const file = new File([text], 'scene.txt', { type: 'text/plain' });
+    let canFiles = false;
+    try { canFiles = !!navigator.canShare && navigator.canShare({ files: [file] }); } catch (e) { canFiles = false; }
+    const payload = canFiles ? { files: [file], title: 'scene.txt' } : { title: 'scene.txt', text: text };
+    navigator.share(payload).then(() => toast('已备份')).catch(() => {});
+  }
+  function importAll(){
+    const text = $('importArea').value.trim();
+    if (!text){ toast('请先粘贴要恢复的文本'); return; }
+    const parsed = [];
+    text.split('\n').forEach(line => {
+      const l = line.trim();
+      if (!l) return;
+      const parts = l.split(', ');
+      if (parts.length < 4) return;
+      const idx = parseInt(parts[0].split(',')[0], 10);
+      if (isNaN(idx)) return;
+      parsed.push({ index: idx, start: parts[1], end: parts[2], name: parts[3] });
+    });
+    if (parsed.length === 0){ toast('没有解析到有效记录，请检查格式'); return; }
+    askConfirm('导入 ' + parsed.length + ' 段记录，替换当前记录？', () => {
+      segments = parsed;
+      renumber();
+      save();
+      render();
+      $('importArea').value = '';
+      toast('已导入 ' + segments.length + ' 段');
+    });
+  }
 
+  // ---------- 界面 ----------
   function initButtons(){
     const grid = $('buttons');
     BUTTON_DEFS.forEach(def => {
@@ -311,6 +397,8 @@
   });
 
   $('copyBtn').addEventListener('click', copyAll);
+  $('shareBtn').addEventListener('click', shareAll);
+  $('importBtn').addEventListener('click', importAll);
   $('clearBtn').addEventListener('click', () => {
     askConfirm('确定清空所有记录？', () => {
       segments = []; nextIndex = 1; currentCode = null; highlight(null);
@@ -318,11 +406,24 @@
     });
   });
 
-  load();
-  initButtons();
-  render();
-  setInterval(tick, 1000);
-  tick();
+  // 应用切到后台/关闭前再保存一次
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') save();
+  });
+  window.addEventListener('pagehide', save);
+
+  // ---------- 启动 ----------
+  (async function init(){
+    await load();
+    initButtons();
+    render();
+    if (currentCode !== null) {
+      setStatus('▶ 正在记录：' + codeName(currentCode) + '（开始于 ' + currentStart + ' UTC）', true);
+      highlight(currentCode);
+    }
+    setInterval(tick, 1000);
+    tick();
+  })();
 </script>
 </body>
 </html>
