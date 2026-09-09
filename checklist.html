@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>数据采集检查清单</title>
+<style>
+  :root { --green:#27ae60; --red:#c0392b; }
+  [hidden] { display: none !important; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#f4f5f7; color:#222; touch-action:manipulation; }
+  .wrap { max-width: 560px; margin:0 auto; padding:12px; }
+  h1 { font-size:20px; text-align:center; margin:10px 0 2px; }
+  .sub { text-align:center; color:#888; font-size:13px; margin:0 0 12px; }
+  .progress { background:#fff; border-radius:12px; padding:14px; box-shadow:0 1px 3px rgba(0,0,0,0.08); text-align:center; }
+  .progress .count { font-size:15px; font-weight:700; }
+  .progress .count b { font-size:22px; color:var(--green); }
+  .bar { height:8px; background:#eef0f2; border-radius:6px; margin-top:10px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:0; background:var(--green); border-radius:6px; transition:width .25s; }
+  #allDone { margin-top:10px; font-size:15px; font-weight:700; color:var(--green); }
+  .list { margin-top:12px; }
+  .item { display:flex; align-items:center; gap:12px; width:100%; background:#fff; border:1px solid #e3e5e8; border-radius:12px; padding:14px; margin-bottom:10px; cursor:pointer; text-align:left; font-size:16px; color:#222; transition:background .15s,border-color .15s; }
+  .item:active { transform:scale(0.99); }
+  .box { flex:0 0 26px; width:26px; height:26px; border:2px solid #c8ccd0; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; font-size:15px; font-weight:700; transition:all .15s; }
+  .box::after { content:'✓'; opacity:0; }
+  .item .text { flex:1; }
+  .item .time { font-size:12px; color:#999; font-variant-numeric:tabular-nums; }
+  .item.checked { background:#eafaf0; border-color:var(--green); }
+  .item.checked .box { background:var(--green); border-color:var(--green); }
+  .item.checked .box::after { opacity:1; }
+  .item.checked .text { color:#1e7e42; font-weight:600; }
+  .foot { margin-top:14px; text-align:center; }
+  .foot button { padding:12px 20px; font-size:15px; border-radius:10px; border:1px solid #ccc; background:#fff; color:var(--red); font-weight:600; }
+  .foot .nav { margin-top:14px; font-size:13px; }
+  .foot .nav a { color:#2b6cb0; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>数据采集检查清单</h1>
+  <p class="sub">开车前逐项确认，打勾即完成</p>
+
+  <div class="progress">
+    <div class="count">已完成 <b id="doneCount">0</b> / <span id="totalCount">9</span></div>
+    <div class="bar"><i id="progressFill"></i></div>
+    <div id="allDone" hidden>✓ 全部完成，可以出发</div>
+  </div>
+
+  <div class="list" id="list"></div>
+
+  <div class="foot">
+    <button id="resetBtn">全部重置</button>
+    <div class="nav"><a href="./index.html">← 打开路况记录器</a></div>
+  </div>
+</div>
+
+<script>
+  const ITEMS = [
+    'CANoe 开始记录',
+    '轮速开始记录（4轮都有数据）',
+    'RVP1234',
+    'tiles发布',
+    'tiles区域确认',
+    'data发布',
+    'int值正确',
+    '真值系统开始记录',
+    'truth文件都打开了运行',
+  ];
+  const STORAGE_KEY = 'checklist_v1';
+
+  let checked = new Array(ITEMS.length).fill(false);
+  let times = new Array(ITEMS.length).fill(null);
+
+  const $ = id => document.getElementById(id);
+  function pad(n){ return (n < 10 ? '0' : '') + n; }
+  function nowLocal(){
+    const d = new Date();
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  // 存储：localStorage + IndexedDB 双份，避免切应用/刷新后打勾状态丢失
+  function pack(){ return { checked, times, savedAt: Date.now() }; }
+  function unpack(d){
+    if (Array.isArray(d.checked) && d.checked.length === ITEMS.length) checked = d.checked;
+    if (Array.isArray(d.times) && d.times.length === ITEMS.length) times = d.times;
+  }
+  function idbOpen(){
+    return new Promise(res => {
+      try {
+        if (!('indexedDB' in window)) { res(null); return; }
+        const rq = indexedDB.open('checklist', 1);
+        rq.onupgradeneeded = () => { if (!rq.result.objectStoreNames.contains('kv')) rq.result.createObjectStore('kv'); };
+        rq.onsuccess = () => res(rq.result);
+        rq.onerror = () => res(null);
+      } catch (e) { res(null); }
+    });
+  }
+  function idbSet(k, v){ idbOpen().then(db => { if (db) { try { db.transaction('kv','readwrite').objectStore('kv').put(v, k); } catch (e) {} } }); }
+  function idbGet(k){ return new Promise(res => { idbOpen().then(db => { if (!db) { res(null); return; } try { const rq = db.transaction('kv','readonly').objectStore('kv').get(k); rq.onsuccess = () => res(rq.result || null); rq.onerror = () => res(null); } catch (e) { res(null); } }); }); }
+  function save(){
+    const d = pack();
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch (e) {}
+    idbSet(STORAGE_KEY, d);
+  }
+  async function load(){
+    let ls = null; try { ls = JSON.parse(localStorage.getItem(STORAGE_KEY)) || null; } catch (e) {}
+    const idb = await idbGet(STORAGE_KEY);
+    let d = null;
+    if (ls && idb) d = (idb.savedAt >= ls.savedAt) ? idb : ls;
+    else d = ls || idb;
+    if (d) unpack(d);
+  }
+
+  function renderItems(){
+    const list = $('list');
+    list.innerHTML = '';
+    ITEMS.forEach((label, i) => {
+      const b = document.createElement('button');
+      b.className = 'item' + (checked[i] ? ' checked' : '');
+      b.dataset.i = i;
+      b.innerHTML = '<span class="box"></span><span class="text"></span><span class="time"></span>';
+      b.querySelector('.text').textContent = (i + 1) + '. ' + label;
+      b.querySelector('.time').textContent = times[i] || '';
+      b.addEventListener('click', () => toggle(i));
+      list.appendChild(b);
+    });
+  }
+  function toggle(i){
+    checked[i] = !checked[i];
+    times[i] = checked[i] ? nowLocal() : null;
+    save();
+    const b = $('list').querySelector('.item[data-i="' + i + '"]');
+    if (b) { b.classList.toggle('checked', checked[i]); b.querySelector('.time').textContent = times[i] || ''; }
+    updateProgress();
+  }
+  function updateProgress(){
+    const done = checked.filter(Boolean).length;
+    const total = ITEMS.length;
+    $('doneCount').textContent = done;
+    $('totalCount').textContent = total;
+    $('progressFill').style.width = (done / total * 100) + '%';
+    $('allDone').hidden = done !== total;
+  }
+
+  $('resetBtn').addEventListener('click', () => {
+    checked = new Array(ITEMS.length).fill(false);
+    times = new Array(ITEMS.length).fill(null);
+    save(); renderItems(); updateProgress();
+  });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') save(); });
+  window.addEventListener('pagehide', save);
+
+  (async function init(){
+    await load();
+    renderItems();
+    updateProgress();
+  })();
+</script>
+</body>
+</html>
